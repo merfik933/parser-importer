@@ -6,7 +6,9 @@
 - Відкриває головне бічне меню та переходить до розділу "Shop by department".
 - Рекурсивно обходить всі вкладені категорії, збираючи їх URL.
 - Зберігає зібрані посилання у файл ./settings/categories.json у форматі JSON.
-Призначення: автоматизація збору структури категорій для подальшого парсингу товарів.
+
+Використання: 
+запустіть скрипт напряму, попередньо підготувавши файл categories.json з посиланнями на категорії, або викличте collect_categories_urls() з іншого модуля.
 """
 
 import json
@@ -58,16 +60,17 @@ def collect_categories_urls():
 
     # Збір URL категорій. Використовується рекурсивна функція для збору всіх вкладених категорій
     urls = []
-
     def collect_urls_from_menu():
         time.sleep(0.5)
         try:
+            # Знаходимо всі елементи категорій у меню
             categories = driver.find_elements(By.CSS_SELECTOR, ".menu-list .side-menu-item")
         except Exception:
             return
 
         for i in range(len(categories)):
             try:
+                # Оновлюємо список категорій, оскільки DOM міг змінитися
                 categories = driver.find_elements(By.CSS_SELECTOR, ".menu-list .side-menu-item")
                 if i >= len(categories):
                     break
@@ -75,6 +78,7 @@ def collect_categories_urls():
                 tag = category.tag_name.lower()
 
                 if tag == "a":
+                    # Якщо елемент є посиланням, отримуємо його href
                     url = category.get_attribute("href")
                     if url:
                         full_url = "https://www.fruugo.co.uk" + url if url.startswith("/") else url
@@ -83,9 +87,11 @@ def collect_categories_urls():
 
                 elif tag == "button":
                     try:
+                        # Якщо елемент є кнопкою, клікаємо для переходу до підкатегорій
                         category.click()
                         time.sleep(0.5)
                         collect_urls_from_menu()
+                        # Повертаємося назад після обходу підкатегорій
                         back_button = driver.find_element(By.CSS_SELECTOR, "button.back-button")
                         if back_button:
                             back_button.click()
@@ -98,7 +104,7 @@ def collect_categories_urls():
     collect_urls_from_menu()
 
     # Збереження URL категорій у файл
-    with open("./settings/categories.json", "w", encoding="utf-8") as f:
+    with open("./data/categories.json", "w", encoding="utf-8") as f:
         json.dump(urls, f, ensure_ascii=False, indent=2)
 
     print(f"Зібрано {len(urls)} URL категорій.")
