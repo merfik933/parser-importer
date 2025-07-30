@@ -62,6 +62,7 @@ def collect_product_data(categories, product_handler):
                 collect_category(category, product_handler)
             except Exception as e:
                 print(f"Помилка при зборі даних для категорії {category}: {e}")
+                time.sleep(requests_delay)
 
 # Функція для збору даних з категорії
 def collect_category(category, product_handler):
@@ -169,12 +170,12 @@ def collect_product_page(url):
         return None
 
     # Отримання категорії
-    categories = soup.select_one(CATEGORIES_SELECTOR)
+    categories = soup.select(CATEGORIES_SELECTOR)
     if categories:
         categories = " > ".join([cat.get_text(strip=True) for cat in categories])
     else:
-        print(f"Не вдалося знайти категорію продукту на сторінці {url}")
-        return None
+        print(f"Не вдалося знайти категорії продукту на сторінці {url}")
+        categories = None
 
     # Отримання бренду
     brand = soup.select_one(BRAND_SELECTOR)
