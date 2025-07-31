@@ -7,7 +7,7 @@ from itertools import cycle
 from tqdm import tqdm
 import aiohttp
 from aiohttp import ClientTimeout
-from tqdm import tqdm as tqdm_inner
+import time
 
 
 # Завантажуємо конфігурацію
@@ -19,6 +19,7 @@ use_proxy = config.getboolean('DEFAULT', 'use_proxy', fallback=False)
 max_threads = config.getint('DEFAULT', 'max_threads', fallback=5)
 max_retries = config.getint('DEFAULT', 'max_retries', fallback=3)
 requests_delay = config.getint('DEFAULT', 'requests_delay', fallback=1)
+batch_size = config.getint('DEFAULT', 'batch_size', fallback=100)
 
 # Якщо використовується проксі, завантажуємо список проксі з файлу
 if use_proxy:
@@ -64,7 +65,6 @@ async def fetch(session, url):
         try:
             async with sem:
                 async with session.get(url, proxy=proxy) as response:
-                    print(f"Отримання {url} (спроба {attempt + 1})")
                     response.raise_for_status()
                     text = await response.text()
                 await asyncio.sleep(requests_delay)
@@ -73,6 +73,20 @@ async def fetch(session, url):
             if attempt == max_retries - 1:
                 print(f"Не вдалося отримати {url}: {e}")
             await asyncio.sleep(requests_delay)
+    return None
+
+# Асинхронна функція для отримання HTML-коду сторінки варіації
+async def variation_fetch(session, url):
+    for attempt in range(max_retries):
+        proxy = next(proxy_cycle) if proxy_cycle else None
+        try:
+            async with session.get(url, proxy=proxy) as response:
+                response.raise_for_status()
+                text = await response.text()
+            return text
+        except Exception as e:
+            if attempt == max_retries - 1:
+                print(f"Не вдалося отримати {url}: {e}")
     return None
 
 # Асинхронна функція для збору даних про продукти з категорій
@@ -88,10 +102,12 @@ async def collect_product_data(categories, product_handler):
 
 # Функція для збору даних з категорії
 async def collect_category(session, category, product_handler):
-    page_url = category + "?pageSize=12"
+    page_url = category + "?pageSize=128"
 
     last_page_number = None
     page_bar = None
+
+    batch = []
 
     # Цикл для збору продуктів з категорії по сторінках
     while True:
@@ -100,15 +116,17 @@ async def collect_category(session, category, product_handler):
             break
         soup = BeautifulSoup(page_html, 'html.parser')
 
+        # Знаходимо останню сторінку, якщо вона є
         if not last_page_number:
-            # Знаходимо останню сторінку, якщо вона є
             last_page_element = soup.select_one(LAST_PAGE_SELECTOR)
             last_page_number = int(last_page_element.get_text(strip=True))
             page_bar = tqdm(total=last_page_number, desc='Сторінки', unit='стр.')
         
+        # Оновлюємо прогресбар для сторінок
         if page_bar:
             page_bar.update(1)
         
+        # Збираємо посилання на продукти на поточній сторінці
         products = soup.select(PRODUCT_LINK_SELECTOR)
         tasks = []
         for product in products:
@@ -117,13 +135,19 @@ async def collect_category(session, category, product_handler):
                 full_url = "https://www.fruugo.co.uk" + url if url.startswith("/") else url
                 tasks.append(asyncio.create_task(collect_product_page(session, full_url)))
 
+        # Виконуємо асинхронні задачі для збору даних про продукти
         for product in tqdm(products, desc="Товари на сторінці", unit="прод"):
             url = product.get('href')
             if url:
                 full_url = "https://www.fruugo.co.uk" + url if url.startswith("/") else url
-                product_data = await collect_product_page(session, full_url)
+                product_data = await collect_product_page(session, full_url, page_url)
                 if product_data:
-                    product_handler(product_data)
+                    batch.append(product_data)
+
+                    # Якщо розмір батчу досягнув batch_size, обробляємо його
+                    if len(batch) >= batch_size:
+                        product_handler(batch)
+                        batch = []
 
         # Перевірка наявності кнопки "Наступна сторінка"
         next_page = soup.select_one(NEXT_PAGE_SELECTOR)
@@ -139,10 +163,14 @@ async def collect_category(session, category, product_handler):
                 break
 
         await asyncio.sleep(requests_delay)
+
+    # Обробка залишків продуктів у батчі
+    if len(batch) > 0:
+        product_handler(batch)
         
 
 # Функція для збору даних про продукт за URL
-async def collect_product_page(session, url):
+async def collect_product_page(session, url, parent_page_url):
     html = await fetch(session, url)
     if html is None:
         return None
@@ -219,8 +247,8 @@ async def collect_product_page(session, url):
             else:
                 print(f"Не вдалося отримати ID продукту з URL: {variation_url}")
                 return None
-            
-            html = await fetch(session, variation_url)
+
+            html = await variation_fetch(session, variation_url)
             if html is None:
                 return None
             soup = BeautifulSoup(html, 'html.parser')
@@ -297,6 +325,7 @@ async def collect_product_page(session, url):
     product_data = {
         "title": title,
         "url": url,
+        "parent_page_url": parent_page_url,
         "regular_price": regular_price,
         "sale_price": sale_price,
         "description": description,
