@@ -11,15 +11,8 @@ config = configparser.ConfigParser()
 config.read('config.ini')
 
 # Отримуємо налаштування з конфігурації
-use_proxy = config.getboolean('DEFAULT', 'use_proxy', fallback=False)
-max_threads = config.getint('DEFAULT', 'max_threads', fallback=5)
-max_retries = config.getint('DEFAULT', 'max_retries', fallback=3)
 requests_delay = config.getint('DEFAULT', 'requests_delay', fallback=1)
-
-# Якщо використовується проксі, завантажуємо список проксі з файлу
-if use_proxy:
-    with open('proxies.txt', 'r', encoding='utf-8') as f:
-        proxies = [line.strip() for line in f if line.strip()]
+batch_size = config.getint('DEFAULT', 'batch_size', fallback=100)
 
 # Селектори для парсингу
 PRODUCT_LINK_SELECTOR = '.products-list a'
