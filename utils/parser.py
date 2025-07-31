@@ -33,8 +33,8 @@ SALE_PRICE_SELECTOR = ".js-meta-price"
 DESCRIPTION_SELECTOR = "#description"
 BRAND_SELECTOR = "ul.product-description-spec-list li:has(strong:-soup-contains('Brand')) span"
 VARIATION_SELECTOR = ".custom-select option"
-SIZE_SELECTOR = ".Product__Details .Product__Title label[for='Colour'] span"
-COLOR_SELECTOR = ".Product__Details .Product__Title label[for='Size'] span"
+SIZE_SELECTOR = ".Product__Details .Product__Title label[for='Size'] span"
+COLOR_SELECTOR = ".Product__Details .Product__Title label[for='Colour'] span"
 AVAILABILITY_SELECTOR = ".Product__BuyBox strong"
 IMAGES_SELECTOR = "button.js-gallery-thumb"
 IMAGE_SELECTOR = "#main .Product .Product__Top .Product__Gallery .ProductGallery.js-hover-zoom img"
@@ -247,6 +247,7 @@ def collect_product_page(url):
     variations_options = soup.select(VARIATION_SELECTOR)
     variations = []
     all_variation_ids = []
+    images = []
     for variation_option in variations_options:
         value = variation_option.get('value', '')
 
@@ -264,6 +265,7 @@ def collect_product_page(url):
             variation_data = get_variation_by_url(variation_url)
             if variation_data:
                 variations.append(variation_data)
+                images.extend(variation_data["images"])
     
     product_data = {
         "title": title,
@@ -272,6 +274,7 @@ def collect_product_page(url):
         "sale_price": sale_price,
         "description": description,
         "categories": categories,
+        "images": images,
         "brand": brand,
         "variations": variations,
     }
