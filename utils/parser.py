@@ -258,7 +258,9 @@ def collect_product_page(url):
             variation_data = get_variation_by_url(variation_url)
             if variation_data:
                 variations.append(variation_data)
-                images.extend(variation_data["images"])
+                for img in variation_data.get("images", []):
+                    if img not in images:
+                        images.append(img)
     
     product_data = {
         "title": title,
