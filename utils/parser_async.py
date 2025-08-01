@@ -7,19 +7,17 @@ from itertools import cycle
 from tqdm import tqdm
 import aiohttp
 from aiohttp import ClientTimeout
-import time
-
 
 # Завантажуємо конфігурацію
 config = configparser.ConfigParser()
 config.read('config.ini')
 
 # Отримуємо налаштування з конфігурації
-use_proxy = config.getboolean('DEFAULT', 'use_proxy', fallback=False)
-max_threads = config.getint('DEFAULT', 'max_threads', fallback=5)
-max_retries = config.getint('DEFAULT', 'max_retries', fallback=3)
-requests_delay = config.getint('DEFAULT', 'requests_delay', fallback=1)
-batch_size = config.getint('DEFAULT', 'batch_size', fallback=100)
+use_proxy = config.getboolean('PARSER', 'use_proxy', fallback=False)
+max_threads = config.getint('PARSER', 'max_threads', fallback=5)
+max_retries = config.getint('PARSER', 'max_retries', fallback=3)
+requests_delay = config.getint('PARSER', 'requests_delay', fallback=1)
+batch_size = config.getint('PARSER', 'batch_size', fallback=100)
 
 # Якщо використовується проксі, завантажуємо список проксі з файлу
 if use_proxy:
@@ -71,7 +69,7 @@ async def fetch(session, url):
             return text
         except Exception as e:
             if attempt == max_retries - 1:
-                print(f"Не вдалося отримати {url}: {e}")
+                print(f"❌ Не вдалося отримати {url}: {e}")
             await asyncio.sleep(requests_delay)
     return None
 
@@ -86,7 +84,7 @@ async def variation_fetch(session, url):
             return text
         except Exception as e:
             if attempt == max_retries - 1:
-                print(f"Не вдалося отримати {url}: {e}")
+                print(f"❌ Не вдалося отримати {url}: {e}")
     return None
 
 # Асинхронна функція для збору даних про продукти з категорій
@@ -113,6 +111,7 @@ async def collect_category(session, category, product_handler):
     while True:
         page_html = await fetch(session, page_url)
         if page_html is None:
+            print(f"❌ Не вдалося отримати HTML для {page_url}")
             break
         soup = BeautifulSoup(page_html, 'html.parser')
 
@@ -128,14 +127,13 @@ async def collect_category(session, category, product_handler):
         
         # Збираємо посилання на продукти на поточній сторінці
         products = soup.select(PRODUCT_LINK_SELECTOR)
-        tasks = []
-        for product in products:
-            url = product.get('href')
-            if url:
-                full_url = "https://www.fruugo.co.uk" + url if url.startswith("/") else url
-                tasks.append(asyncio.create_task(collect_product_page(session, full_url)))
 
-        # Виконуємо асинхронні задачі для збору даних про продукти
+        # Якщо продукти не знайдено, виходимо з циклу
+        if not products:
+            print(f"❌ Не знайдено продукти на сторінці {page_url}")
+            break
+
+        # Збираємо дані про кожен продукт
         for product in tqdm(products, desc="Товари на сторінці", unit="прод"):
             url = product.get('href')
             if url:
@@ -152,14 +150,14 @@ async def collect_category(session, category, product_handler):
         # Перевірка наявності кнопки "Наступна сторінка"
         next_page = soup.select_one(NEXT_PAGE_SELECTOR)
         if not next_page or 'disabled' in next_page.get('class', []):
-            print("Наступна сторінка не знайдена або вона вимкнена.")
+            print(f"❌ Наступна сторінка не знайдена або вона вимкнена.")
             break
         else:
             next_page_url = next_page.get('href')
             if next_page_url:
                 page_url = "https://www.fruugo.co.uk" + next_page_url if next_page_url.startswith("/") else next_page_url
             else:
-                print("URL наступної сторінки не знайдено.")
+                print("❌ URL наступної сторінки не знайдено.")
                 break
 
         await asyncio.sleep(requests_delay)
@@ -181,7 +179,7 @@ async def collect_product_page(session, url, parent_page_url):
     if title:
         title = title.get_text(strip=True)
     else:
-        print(f"Не вдалося знайти назву продукту на сторінці {url}")
+        print(f"❌ Не вдалося знайти назву продукту на сторінці {url}")
         return None
 
     # Функція для очищення та перетворення тексту ціни у число
@@ -211,7 +209,7 @@ async def collect_product_page(session, url, parent_page_url):
         if regular_price:
             regular_price = extract_price(regular_price.get_text(strip=True))
         else:
-            print(f"Не вдалося знайти ціну продукту на сторінці {url}")
+            print(f"❌ Не вдалося знайти ціну продукту на сторінці {url}")
             return None
 
     # Отримання опису
@@ -219,7 +217,7 @@ async def collect_product_page(session, url, parent_page_url):
     if description:
         description = str(description)
     else:
-        print(f"Не вдалося знайти опис продукту на сторінці {url}")
+        print(f"❌ Не вдалося знайти опис продукту на сторінці {url}")
         return None
 
     # Отримання категорії
@@ -227,7 +225,7 @@ async def collect_product_page(session, url, parent_page_url):
     if categories:
         categories = " > ".join([cat.get_text(strip=True) for cat in categories])
     else:
-        print(f"Не вдалося знайти категорії продукту на сторінці {url}")
+        print(f"❌ Не вдалося знайти категорії продукту на сторінці {url}")
         categories = None
 
     # Отримання бренду
@@ -239,56 +237,52 @@ async def collect_product_page(session, url, parent_page_url):
 
     # Функція для отримання варіації за URL
     async def get_variation_by_url(variation_url):
-        try:
-            match = re.search(r'/p-(\d+)-(\d+)', variation_url)
-            if match:
-                product_id, variant_id = match.groups()
-                sku = f"SKU-{product_id}-{variant_id}"
-            else:
-                print(f"Не вдалося отримати ID продукту з URL: {variation_url}")
-                return None
-
-            html = await variation_fetch(session, variation_url)
-            if html is None:
-                return None
-            soup = BeautifulSoup(html, 'html.parser')
-
-            # Отримання розміру
-            size = soup.select(SIZE_SELECTOR)
-            if size:
-                size = size[0].get_text(strip=True)
-            else:
-                size = None
-
-            # Отримання кольору
-            color = soup.select(COLOR_SELECTOR)
-            if color:
-                color = color[0].get_text(strip=True)
-            else:
-                color = None
-
-            # Отримання наявності
-            availability = soup.select_one(AVAILABILITY_SELECTOR)
-            if availability:
-                availability_text = availability.get_text(strip=True)
-                availability = availability_text == "In stock"
-            else:
-                availability = None
-
-            # Отримання зображень
-            images = soup.select(IMAGES_SELECTOR)
-            if images:
-                images = [img.get('data-image') for img in images]
-            else:
-                image = soup.select_one(IMAGE_SELECTOR)
-                if image:
-                    images = [image.get('src')]
-                else:
-                    images = []
-
-        except Exception as e:
-            print(f"Помилка при отриманні варіації з {variation_url}: {e}")
+        match = re.search(r'/p-(\d+)-(\d+)', variation_url)
+        if match:
+            product_id, variant_id = match.groups()
+            sku = f"SKU-{product_id}-{variant_id}"
+        else:
+            print(f"❌ Не вдалося отримати ID продукту з URL: {variation_url}")
             return None
+
+        html = await variation_fetch(session, variation_url)
+        if html is None:
+            return None
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Отримання розміру
+        size = soup.select(SIZE_SELECTOR)
+        if size:
+            size = size[0].get_text(strip=True)
+        else:
+            size = None
+
+        # Отримання кольору
+        color = soup.select(COLOR_SELECTOR)
+        if color:
+            color = color[0].get_text(strip=True)
+        else:
+            color = None
+
+        # Отримання наявності
+        availability = soup.select_one(AVAILABILITY_SELECTOR)
+        if availability:
+            availability_text = availability.get_text(strip=True)
+            availability = availability_text == "In stock"
+        else:
+            availability = None
+
+        # Отримання зображень
+        images = soup.select(IMAGES_SELECTOR)
+        if images:
+            images = [img.get('data-image') for img in images]
+        else:
+            image = soup.select_one(IMAGE_SELECTOR)
+            if image:
+                images = [image.get('src')]
+            else:
+                images = []
+
         return {
             "sku": sku,
             "size": size,
@@ -316,11 +310,18 @@ async def collect_product_page(session, url, parent_page_url):
             all_variation_ids.append(id)
             variation_url = re.sub(r'(p-\d+)', rf'\1-{id}', url)
 
-            variation_data = await get_variation_by_url(variation_url)
+            try:
+                variation_data = await get_variation_by_url(variation_url)
+            except Exception as e:
+                print(f"❌ Помилка при отриманні варіації з {variation_url}: {e}")
+                continue
             if variation_data:
                 variations.append(variation_data)
                 if variation_data.get("images"):
-                    images.extend(variation_data["images"])
+                    for img in variation_data["images"]:
+                        if img not in images:
+                            images.append(img)
+
 
     product_data = {
         "title": title,
@@ -341,15 +342,13 @@ if __name__ == "__main__":
     with open('data/categories.json', 'r', encoding='utf-8') as f:
         categories = json.load(f)
 
-    products = []
+    counter = 0
 
     def test_handler(data):
-        products.append(data)
-
-        with open('data/products_data.json', 'w', encoding='utf-8') as f:
-            json.dump(products, f, ensure_ascii=False, indent=2)
+        global counter
+        file_path = f"data/batches/batch_{counter}.json"
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        counter += 1
 
     asyncio.run(collect_product_data(categories, test_handler))
-
-
-        
