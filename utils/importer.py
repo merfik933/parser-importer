@@ -1,0 +1,333 @@
+import os
+import json
+import time
+from tqdm import tqdm
+import threading
+from pathlib import Path
+from queue import Queue
+from dotenv import load_dotenv
+import threading
+import requests
+from urllib.parse import urlparse
+from io import BytesIO
+import configparser
+
+# Отримуємо налаштування з конфігурації
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+download_images_before_import = config.getboolean('IMPORTER', 'download_images_before_import', fallback=True)
+requests_delay = config.getint('IMPORTER', 'requests_delay', fallback=1)
+
+# Завантажуємо .env
+load_dotenv()
+WC_URL = os.getenv("WC_URL")
+WC_KEY = os.getenv("WC_KEY")
+WC_SECRET = os.getenv("WC_SECRET")
+WC_USERNAME = os.getenv("WC_USERNAME")
+WC_PASSWORD = os.getenv("WC_PASSWORD")
+
+# Глобальна черга з шляхами до файлів-батчів
+batch_queue = Queue()
+
+# Флаг для контролю процесу обробки
+is_processing = False
+
+# Лок для синхронізації доступу до черги
+processing_lock = threading.Lock()
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
+# Функція для виконання HTTP запитів з повторними спробами
+def make_request(method, url, **kwargs):
+    for attempt in range(3):
+        if attempt > 0:
+            print(f"🔁 Повторна спроба {attempt+1} для {method.upper()} {url}")
+        time.sleep(requests_delay)
+        try:
+            response = requests.request(method, url, **kwargs)
+
+            if "Fatal error" in response.text:
+                print(f"❌ WC Fatal error: {response.text[:200]}...")
+                continue
+
+            if response.status_code in [200, 201]:
+                return response
+
+            print(f"❌ Спроба {attempt+1}: {response.status_code} {response.text[:200]}...")
+
+        except Exception as e:
+            print(f"❌ Виняток при запиті (спроба {attempt+1}): {e}")
+
+    print(f"❌ Не вдалося виконати {method.upper()} {url} після 3 спроб")
+    return None
+
+# Функція для додавання батчу в чергу
+def add_batch_to_queue(batch_path: str):
+    global is_processing
+    if Path(batch_path).is_file():
+        batch_queue.put(batch_path)
+        
+        with processing_lock:
+            if not is_processing:
+                is_processing = True
+                threading.Thread(target=process_batch, daemon=True).start()
+    else:
+        print(f"❌ Файл не знайдено: {batch_path}")
+
+# Обробка одного батчу
+def process_batch():
+    global is_processing
+    while not batch_queue.empty():
+        batch_path = batch_queue.get()
+        try:
+            with open(batch_path, 'r', encoding='utf-8') as file:
+                data = json.load(file)
+                try:
+                    import_batch(data)
+                except Exception as e:
+                    print(f"❌ Помилка при обробці {batch_path}: {e}")
+        except Exception as e:
+            print(f"❌ Помилка при обробці {batch_path}: {e}")
+        finally:
+            batch_queue.task_done()
+    is_processing = False
+
+# Функція для імпорту батчу
+def import_batch(products):
+    create_payload = {
+        "create": []
+    }
+
+    all_img_urls = {}   
+    
+    # Формуємо дані для створення товарів
+    for p in tqdm(products, desc="Імпорт батчу товарів", unit="т."):
+        # Імпорт варіацій
+        attributes = []
+        img_urls = {}
+
+        sizes = list({v["size"] for v in p["variations"] if v.get("size")})
+        if sizes:
+            attributes.append({
+                "name": "size",
+                "variation": True,
+                "visible": True,
+                "options": sizes
+            })
+
+        colors = list({v["color"] for v in p["variations"] if v.get("color")})
+        if colors:
+            attributes.append({
+                "name": "color",
+                "variation": True,
+                "visible": True,
+                "options": colors
+            })
+
+        # Завантаження зображень
+        if download_images_before_import:
+            for img_url in tqdm(p["images"], desc="Завантаження зображень", leave=False):
+                uploaded = upload_image_to_wc(img_url)
+                if uploaded:
+                    img_urls[img_url] = uploaded
+        else:
+            img_urls = {img: img for img in p["images"]}
+
+        # Додаємо всі зображення до all_img_urls
+        for img_url, img_id in img_urls.items():
+            all_img_urls[img_url] = img_id
+
+        # Отримання категорії
+        category_id = get_or_create_category_chain(p["categories"])
+
+        create_payload["create"].append({
+            "name": p["title"],
+            "type": "variable",
+            "description": p["description"],
+            "categories": [{"id": category_id}],
+            "images": [{"id": img} for img in img_urls.values()],
+            "attributes": attributes
+        })
+
+    product_res = make_request(
+        "POST",
+        f"{WC_URL}/wp-json/wc/v3/products/batch",
+        auth=(WC_KEY, WC_SECRET),
+        json=create_payload
+    )
+
+    if product_res.status_code not in [200, 201]:
+        print(f"❌ Помилка при створенні товарів: {product_res.status_code} {product_res.text}")
+        return
+
+    created = product_res.json().get("create", [])
+    print(f"✅ Створено товарів: {len(created)}")
+
+    for product_obj, p in tqdm(zip(created, products), total=len(created), desc="Імпорт варіацій батчу", unit="в."):
+        product_id = product_obj["id"]
+        variations = []
+
+        for v in p["variations"]:
+            attr = []
+            if v.get("size"):
+                attr.append({"name": "size", "option": v["size"]})
+
+            if v.get("color"):
+                attr.append({"name": "color", "option": v["color"]})
+
+            print({"id": all_img_urls.get(v["images"][0])}
+                    if v.get("images") and v["images"][0] in all_img_urls
+                    else {})
+
+            variations.append({
+                "sku": v["sku"],
+                "regular_price": str(p["regular_price"]),
+                "sale_price": str(p["sale_price"]),
+                "attributes": attr,
+                "in_stock": v["availability"],
+                "image": (
+                    {"id": all_img_urls.get(v["images"][0])}
+                    if v.get("images") and v["images"][0] in all_img_urls
+                    else {}
+                ),
+            })
+
+
+        var_res = make_request(
+            "POST",
+            f"{WC_URL}/wp-json/wc/v3/products/{product_id}/variations/batch",
+            auth=(WC_KEY, WC_SECRET),
+            json={"create": variations}
+        )
+
+        if var_res.status_code not in [200, 201]:
+            print(f"❌ Варіації для продукту ID {product_obj.get('id', 'невідомо')} не додано: {var_res.status_code}")
+        else:
+            print(f"  ↳ ✅ Варіацій додано: {len(variations)} для продукту ID {product_id}")
+
+def upload_image_to_wc(image_url, retries=3):
+    try:
+        response = make_request("GET", image_url, headers=HEADERS)
+        if not response or response.status_code != 200:
+            print(f"❌ Помилка завантаження картинки: {image_url}")
+            return None
+
+        content = response.content
+
+        if not content or len(content) < 100:
+            print(f"❌ Порожній або надто малий файл: {image_url}")
+            return None
+
+        filename = Path(urlparse(image_url).path).name
+
+        for attempt in range(retries):
+            file_stream = BytesIO(content)
+            headers = {
+                'Content-Disposition': f'attachment; filename="{filename}"'
+            }
+
+            res = requests.post(
+                f"{WC_URL}/wp-json/wp/v2/media",
+                auth=(WC_USERNAME, WC_PASSWORD),
+                headers=headers,
+                files={'file': (filename, file_stream, 'image/jpeg')}
+            )
+
+            if res and res.status_code in [200, 201]:
+                try:
+                    return res.json()["id"]
+                except json.JSONDecodeError:
+                    print(f"❌ Не вдалося розпарсити JSON відповідь: {res.text}. Повторна спроба...")
+            else:
+                print(f"❌ WC не прийняв картинку (спроба {attempt+1}): {res.status_code if res else '❌'} {res.text[:200] if res else ''}")
+                time.sleep(requests_delay)
+
+        print(f"❌ Вичерпано спроб завантаження зображення для {image_url}")
+        return None
+
+    except Exception as e:
+        print(f"❌ Виняток при завантаженні зображення: {e}")
+        return None
+
+def get_or_create_category_chain(breadcrumb_string):
+    categories = [cat.strip() for cat in breadcrumb_string.split(">")]
+    parent_id = 0
+    final_id = None
+
+    for cat in categories:
+        cat = cat.replace("&", "&amp;")
+        res = make_request(
+            "GET",
+            f"{WC_URL}/wp-json/wc/v3/products/categories",
+            auth=(WC_KEY, WC_SECRET),
+            params={"search": cat, "parent": parent_id}
+        )
+
+        if not res:
+            print(f"❌ Не вдалося отримати категорії для '{cat}'")
+            return None
+
+        try:
+            data = res.json()
+        except Exception as e:
+            print(f"❌ Некоректний JSON у відповіді: {res.text}")
+            raise e
+        cat_obj = next((c for c in data if c["name"].lower() == cat.lower()), None)
+
+        if cat_obj:
+            final_id = cat_obj["id"]
+            parent_id = final_id
+            continue
+
+        new_res = make_request(
+            "POST",
+            f"{WC_URL}/wp-json/wc/v3/products/categories",
+            auth=(WC_KEY, WC_SECRET),
+            json={"name": cat, "parent": parent_id}
+        )
+
+        if not new_res:
+            print(f"❌ Запит створення категорії '{cat}' не дав відповіді")
+            return None
+
+        new_cat = new_res.json()
+
+        if "id" in new_cat:
+            final_id = new_cat["id"]
+            parent_id = final_id
+        elif new_cat.get("code") == "term_exists":
+            final_id = new_cat["data"]["resource_id"]
+            parent_id = final_id
+        else:
+            print(f"❌ Помилка створення категорії '{cat}': {new_cat}")
+            return None
+
+    return final_id
+
+
+if __name__ == "__main__":
+    import time
+
+    add_batch_to_queue('data/batches/batch_0.json')
+    # time.sleep(1)  # Затримка для демонстрації асинхронності
+
+    # add_batch_to_queue('data/batches/batch_1.json')
+    # time.sleep(1)  # Затримка для демонстрації асинхронності
+
+    # add_batch_to_queue('data/batches/batch_2.json')
+    # time.sleep(1)  # Затримка для демонстрації асинхронності
+
+    # add_batch_to_queue('data/batches/batch_3.json')
+    # time.sleep(1)  # Затримка для демонстрації асинхронності
+
+    # add_batch_to_queue('data/batches/batch_4.json')
+    # time.sleep(1)  # Затримка для демонстрації асинхронності
+
+    # Очікуємо завершення обробки всіх батчів
+    batch_queue.join()
+
+    print("Всі батчі оброблено.")
