@@ -102,7 +102,8 @@ def import_batch(products):
         "create": []
     }
 
-    all_img_urls = {}   
+    all_img_urls = {}
+    last_categories = {}
     
     # Формуємо дані для створення товарів
     for p in tqdm(products, desc="Імпорт батчу товарів", unit="т."):
@@ -142,8 +143,20 @@ def import_batch(products):
             all_img_urls[img_url] = img_id
 
         # Отримання категорії
-        category_id = get_or_create_category_chain(p["categories"])
+        if p["categories"] in last_categories:
+            category_id = last_categories[p["categories"]]
+            print(f"🔄 Використання останньої категорії: {p['categories']} (ID: {category_id})")
+        else:
+            category_id = get_or_create_category_chain(p["categories"])
 
+        # Зберігаємо останні категорії щоб зменшити кількість запитів
+        last_categories[p["categories"]] = category_id
+
+        # Обмежуємо кількість збережених останніх категорій до 2
+        if len(last_categories) > 2:
+            last_categories = {k: last_categories[k] for k in list(last_categories.keys())[-2:]}
+
+        # Створення товару
         create_payload["create"].append({
             "name": p["title"],
             "type": "variable",
@@ -153,6 +166,7 @@ def import_batch(products):
             "attributes": attributes
         })
 
+    # Створення товарів у WooCommerce
     product_res = make_request(
         "POST",
         f"{WC_URL}/wp-json/wc/v3/products/batch",
@@ -160,13 +174,16 @@ def import_batch(products):
         json=create_payload
     )
 
+    # Перевірка статусу відповіді
     if product_res.status_code not in [200, 201]:
         print(f"❌ Помилка при створенні товарів: {product_res.status_code} {product_res.text}")
         return
 
+    # Отримання створених товарів
     created = product_res.json().get("create", [])
     print(f"✅ Створено товарів: {len(created)}")
 
+    # Імпорт варіацій для кожного створеного товару
     for product_obj, p in tqdm(zip(created, products), total=len(created), desc="Імпорт варіацій батчу", unit="в."):
         product_id = product_obj["id"]
         variations = []
@@ -178,10 +195,6 @@ def import_batch(products):
 
             if v.get("color"):
                 attr.append({"name": "color", "option": v["color"]})
-
-            print({"id": all_img_urls.get(v["images"][0])}
-                    if v.get("images") and v["images"][0] in all_img_urls
-                    else {})
 
             variations.append({
                 "sku": v["sku"],
@@ -209,6 +222,7 @@ def import_batch(products):
         else:
             print(f"  ↳ ✅ Варіацій додано: {len(variations)} для продукту ID {product_id}")
 
+# Функція для завантаження зображення до WooCommerce
 def upload_image_to_wc(image_url, retries=3):
     try:
         response = make_request("GET", image_url, headers=HEADERS)
@@ -241,7 +255,7 @@ def upload_image_to_wc(image_url, retries=3):
                 try:
                     return res.json()["id"]
                 except json.JSONDecodeError:
-                    print(f"❌ Не вдалося розпарсити JSON відповідь: {res.text}. Повторна спроба...")
+                    print(f"❌ Не вдалося розпарсити JSON відповідь: {res.text}.\n🔁 Повторна спроба...")
             else:
                 print(f"❌ WC не прийняв картинку (спроба {attempt+1}): {res.status_code if res else '❌'} {res.text[:200] if res else ''}")
                 time.sleep(requests_delay)
@@ -253,6 +267,7 @@ def upload_image_to_wc(image_url, retries=3):
         print(f"❌ Виняток при завантаженні зображення: {e}")
         return None
 
+# Функція для отримання або створення категорії з ланцюжком (breadcrumb)
 def get_or_create_category_chain(breadcrumb_string):
     categories = [cat.strip() for cat in breadcrumb_string.split(">")]
     parent_id = 0
