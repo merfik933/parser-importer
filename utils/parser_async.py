@@ -264,6 +264,13 @@ async def collect_product_page(session, url, parent_page_url):
         else:
             color = None
 
+        # Костиль для обміну розміру та кольору - на сайті коли вони обидва присутні, то розмір і колір переплутані
+        if color and size:
+            new_color = size
+            new_size = color
+            size = new_size
+            color = new_color
+
         # Отримання наявності
         availability = soup.select_one(AVAILABILITY_SELECTOR)
         if availability:
