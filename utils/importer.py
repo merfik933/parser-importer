@@ -11,6 +11,8 @@ import requests
 from urllib.parse import urlparse
 from io import BytesIO
 import configparser
+import webcolors
+from rapidfuzz import process
 
 # Отримуємо налаштування з конфігурації
 config = configparser.ConfigParser()
@@ -18,6 +20,7 @@ config.read('config.ini')
 
 download_images_before_import = config.getboolean('IMPORTER', 'download_images_before_import', fallback=True)
 requests_delay = config.getint('IMPORTER', 'requests_delay', fallback=1)
+default_swatches_size = config.getint('IMPORTER', 'default_swatches_size', fallback=32)
 
 # Завантажуємо .env
 load_dotenv()
@@ -65,6 +68,25 @@ def make_request(method, url, **kwargs):
     print(f"❌ Не вдалося виконати {method.upper()} {url} після 3 спроб")
     return None
 
+# Отримання ID атрибуту за slug
+def get_attribute_id_by_slug(slug):
+    response = make_request(
+        "GET",
+        f"{WC_URL}/wp-json/wc/v3/products/attributes",
+        auth=(WC_KEY, WC_SECRET)
+    )
+
+    attributes = response.json()
+
+    for attr in attributes:
+        if attr["slug"] == slug:
+            return attr["id"]
+
+    raise ValueError(f"⚠️ Атрибут зі slug '{slug}' не знайдено.")
+
+color_id = get_attribute_id_by_slug("pa_color")
+size_id = get_attribute_id_by_slug("pa_size")
+
 # Функція для додавання батчу в чергу
 def add_batch_to_queue(batch_path: str):
     global is_processing
@@ -111,24 +133,84 @@ def import_batch(products):
         attributes = []
         img_urls = {}
 
-        sizes = list({v["size"] for v in p["variations"] if v.get("size")})
+        # Перевірка наявності атрибутів кольору та розміру
+        def ensure_terms_exist(attr_id, terms):
+            page = 1
+
+            existing_names = {}
+
+            while True:
+                r = requests.get(
+                    f"{WC_URL}/wp-json/wc/v3/products/attributes/{attr_id}/terms",
+                    auth=(WC_KEY, WC_SECRET),
+                    params={"per_page": 100, "page": page}
+                )
+
+                data = r.json()
+                if not data:
+                    break
+
+                existing_names.update({t['name']: t['id'] for t in data})
+
+                if len(data) < 100:
+                    break
+
+                page += 1
+
+            terms_ids = {}
+
+            for term in terms:
+                term_id = existing_names.get(term)
+                if term_id:
+                    terms_ids[term] = term_id
+
+                if not term_id:
+                    r = requests.post(
+                        f"{WC_URL}/wp-json/wc/v3/products/attributes/{attr_id}/terms",
+                        auth=(WC_KEY, WC_SECRET),
+                        json={"name": term}
+                    )
+                    if r.status_code != 201:
+                        print(f"⚠️ Не вдалося створити термін '{term}': {r.status_code} - {r.text}")
+                        continue
+                    term_id = r.json().get("id")
+
+                if attr_id == color_id and term_id:
+                    hex_code = webcolors.name_to_hex(term)
+                    if hex_code:
+                        r = requests.post(
+                            f"https://shop1.sweetcare.christmas/wp-json/custom/v1/set-color-meta/",
+                            json={"term_id": term_id, "hex": hex_code}
+                        )
+                    else:
+                        print(f"⚠️ Не вдалося визначити HEX для '{term}'")
+
+            return terms_ids
+
+        # Обробка розмірів
+        sizes = list(dict.fromkeys(v["size"] for v in p["variations"] if v.get("size")))
         if sizes:
+            sizes_ids = ensure_terms_exist(size_id, sizes)
             attributes.append({
+                "id": size_id,
                 "name": "size",
                 "variation": True,
                 "visible": True,
                 "options": sizes
             })
 
-        colors = list({v["color"] for v in p["variations"] if v.get("color")})
+        # Обробка кольорів
+        colors = list(dict.fromkeys(v["color"] for v in p["variations"] if v.get("color")))
         if colors:
+            colors_term_ids = ensure_terms_exist(color_id, colors)
             attributes.append({
+                "id": color_id,
                 "name": "color",
                 "variation": True,
                 "visible": True,
                 "options": colors
             })
-
+        
         # Завантаження зображень
         if download_images_before_import:
             for img_url in tqdm(p["images"], desc="Завантаження зображень", leave=False):
@@ -156,15 +238,52 @@ def import_batch(products):
         if len(last_categories) > 2:
             last_categories = {k: last_categories[k] for k in list(last_categories.keys())[-2:]}
 
-        # Створення товару
-        create_payload["create"].append({
-            "name": p["title"],
-            "type": "variable",
-            "description": p["description"],
-            "categories": [{"id": category_id}],
-            "images": [{"id": img} for img in img_urls.values()],
-            "attributes": attributes
-        })
+        swatches = {}
+        for var in p["variations"]:
+            if var.get("color") and var.get("images"):
+                color_name = var["color"]
+                color_term_id = colors_term_ids.get(color_name)
+                if color_term_id:
+                    swatches[str(color_term_id)] = {"image": str(img_urls.get(var["images"][0], ""))}
+
+        if swatches:
+            meta_data = [
+                {
+                    "key": "wcboost_variation_swatches",
+                    "value": {
+                        "pa_color": {
+                            "type": "image",
+                            "shape": "square",
+                            "size": "custom",
+                            "custom_size": {"width": default_swatches_size, "height": default_swatches_size},
+                            "swatches": swatches
+                        }
+                    }
+                }
+            ]
+
+            create_payload["create"].append({
+                "name": p["title"],
+                "type": "variable",
+                "description": p["description"],
+                "categories": [{"id": category_id}],
+                "regular_price": str(p["regular_price"]),
+                "sale_price": str(p["sale_price"]),
+                "images": [{"id": img} for img in img_urls.values()],
+                "attributes": attributes,
+                "meta_data": meta_data
+            })
+        else:
+            create_payload["create"].append({
+                "name": p["title"],
+                "type": "simple",
+                "description": p["description"],
+                "regular_price": str(p["regular_price"]),
+                "sale_price": str(p["sale_price"]),
+                "categories": [{"id": category_id}],
+                "images": [{"id": img} for img in img_urls.values()],
+                "attributes": attributes,
+            })
 
     # Створення товарів у WooCommerce
     product_res = make_request(
@@ -191,10 +310,9 @@ def import_batch(products):
         for v in p["variations"]:
             attr = []
             if v.get("size"):
-                attr.append({"name": "size", "option": v["size"]})
-
+                attr.append({"id": size_id, "name": "size", "option": v["size"]})
             if v.get("color"):
-                attr.append({"name": "color", "option": v["color"]})
+                attr.append({"id": color_id, "name": "color", "option": v["color"]})
 
             variations.append({
                 "sku": v["sku"],
@@ -208,7 +326,6 @@ def import_batch(products):
                     else {}
                 ),
             })
-
 
         var_res = make_request(
             "POST",
