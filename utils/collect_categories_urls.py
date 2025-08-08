@@ -144,6 +144,9 @@ def collect_categories_urls():
     with open("./data/categories.json", "w", encoding="utf-8") as f:
         json.dump(urls, f, ensure_ascii=False, indent=2)
 
+    # Закриваємо браузер
+    driver.quit()
+
     logging.info(f"Зібрано {len(urls)} URL категорій. Збережено у файл ./data/categories.json")
     return urls
 
