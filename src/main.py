@@ -1,7 +1,7 @@
 import json
 import os
 
-from src.utils.log import init_logger
+from utils.log import init_logger
 log = init_logger()
 
 def main():
