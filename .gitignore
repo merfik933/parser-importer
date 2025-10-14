@@ -1,5 +1,5 @@
-legacy/
 data/
 __pycache__/
 .env
+.log
 
