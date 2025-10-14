@@ -13,7 +13,7 @@ def main():
 
     categories_file = os.path.join(data_dir, 'categories.json')
     if not os.path.exists(categories_file):
-        from src.utils.categories_collector import collect_categories_urls
+        from src.categories_collector import collect_categories_urls
         categories = collect_categories_urls()
 
         with open(categories_file, 'w', encoding='utf-8') as f:
