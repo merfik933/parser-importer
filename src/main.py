@@ -23,10 +23,10 @@ def main():
             categories = json.load(f)
 
 
-    from src.parser import collect_product_data
+    from src.parser import collect_products_from_categories
     from src.importer import import_batch
 
-    collect_product_data(categories, import_batch)
+    collect_products_from_categories(categories, import_batch)
 
     log.info("Процес збору та імпорту даних завершено.")
 
