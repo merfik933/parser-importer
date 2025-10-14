@@ -13,15 +13,15 @@ def main():
 
     categories_file = os.path.join(data_dir, 'categories.json')
     if not os.path.exists(categories_file):
-        from src.categories_collector import collect_categories_urls
-        categories = collect_categories_urls()
-
         with open(categories_file, 'w', encoding='utf-8') as f:
-            json.dump(categories, f, ensure_ascii=False, indent=2)
+            json.dump([], f, ensure_ascii=False, indent=2)
     else:
         with open(categories_file, 'r', encoding='utf-8') as f:
             categories = json.load(f)
 
+        if not categories:
+            log.warning("Файл categories.json порожній. Будь ласка, додайте URL-адреси категорій у файл.")
+            return
 
     from src.parser import collect_products_from_categories
     from src.importer import import_batch
