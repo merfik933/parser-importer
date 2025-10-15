@@ -1,12 +1,17 @@
 import json
 import os
 
+from src.parser import collect_products_from_categories
+from src.importer import import_batch
+
+# Ініціалізація логера
 from utils.log import init_logger
 log = init_logger()
 
 def main():
     log.info("Запуск процесу збору та імпорту даних...")
     
+    # Перевірка та створення необхідних директорій і файлів
     data_dir = './data'
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
@@ -23,9 +28,7 @@ def main():
             log.warning("Файл categories.json порожній. Будь ласка, додайте URL-адреси категорій у файл.")
             return
 
-    from src.parser import collect_products_from_categories
-    from src.importer import import_batch
-
+    # Збір та імпорт даних
     collect_products_from_categories(categories, import_batch)
 
     log.info("Процес збору та імпорту даних завершено.")
