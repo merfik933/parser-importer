@@ -20,7 +20,7 @@ def init_logger(name: str, level: int = logging.INFO) -> logging.Logger:
         os.makedirs(logs_dir)
 
     # Файловий хендлер
-    file_handler = logging.FileHandler(os.path.join(logs_dir, f'{name}.log'), encoding='utf-8')
+    file_handler = logging.FileHandler(os.path.join(logs_dir, f'{name}.log'), mode='w', encoding='utf-8')
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
