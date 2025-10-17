@@ -27,6 +27,8 @@ def main():
         if not categories:
             log.warning("Файл categories.json порожній. Будь ласка, додайте URL-адреси категорій у файл.")
             return
+        
+    log.info(f"Завантажено {len(categories)} категорій для обробки.")
 
     # Збір та імпорт даних
     collect_products_from_categories(categories, import_batch)

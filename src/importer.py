@@ -11,6 +11,7 @@ from tqdm import tqdm
 import webcolors
 import pandas as pd
 from utils.log import init_logger
+from uuid import uuid4
 
 # Ініціалізуємо логер
 log = init_logger(__name__)
@@ -86,6 +87,7 @@ def get_attribute_id_by_slug(slug):
 
     for attr in attributes:
         if attr["slug"] == slug:
+            log.info(f"Знайдено ID атрибуту '{slug}': {attr['id']}")
             return attr["id"]
 
     raise ValueError(f"⚠️ Атрибут зі slug '{slug}' не знайдено.")
@@ -125,7 +127,7 @@ def import_batch(products):
                 if not data:
                     break
 
-                existing_names.update({t['name']: t['id'] for t in data})
+                existing_names.update({t['name'].strip().lower(): t['id'] for t in data})
 
                 if len(data) < 100:
                     break
@@ -135,7 +137,7 @@ def import_batch(products):
             terms_ids = {}
 
             for term in terms:
-                term_id = existing_names.get(term)
+                term_id = existing_names.get(term.strip().lower())
                 if term_id:
                     terms_ids[term] = term_id
 
@@ -151,7 +153,10 @@ def import_batch(products):
                     term_id = r.json().get("id")
 
                 if attr_id == color_id and term_id:
-                    hex_code = webcolors.name_to_hex(term)
+                    try:
+                        hex_code = webcolors.name_to_hex(term)
+                    except ValueError:
+                        hex_code = None
                     if hex_code:
                         r = requests.post(
                             f"https://shop1.sweetcare.christmas/wp-json/custom/v1/set-color-meta/",
@@ -324,62 +329,68 @@ def import_batch(products):
     # Зберігаємо оновлений статус файл
     status_df.to_csv('data/status.csv', index=False)
     
-
 # Функція для завантаження зображення до WooCommerce
-def upload_image_to_wc(image_url, retries=max_retries):
+def upload_image_to_wc(image_url, session=None, max_attempts=1, timeout=10):
+    """
+    Швидке завантаження тільки для webp-подібних URL (наприклад: .../webp/fit?...).
+    Повертає ID медіа у WP або None.
+    """
     try:
-        response = make_request("GET", image_url, headers=HEADERS)
-        if not response or response.status_code != 200:
-            log.error(f"❌ Помилка завантаження картинки: {image_url}")
+        # Просте правило: якщо в шляху немає 'webp' — вихід
+        path = urlparse(image_url).path or ""
+        if 'webp' not in path.lower():
+            log.error("❌ URL не виглядає як webp — пропускаю: " + image_url)
             return None
 
-        content = response.content
+        sess = session or requests.Session()
+        get_headers = {'User-Agent': 'Mozilla/5.0 (ImageUploader/fast)'}
+        r = sess.get(image_url, headers=get_headers, timeout=timeout, allow_redirects=True)
 
-        if not content or len(content) < 100:
-            log.error(f"❌ Порожній або надто малий файл: {image_url}")
+        if r.status_code != 200:
+            log.error(f"❌ GET failed {r.status_code} for {image_url}")
             return None
 
-        filename = Path(urlparse(image_url).path).name
+        content_type = (r.headers.get('Content-Type') or '').lower()
+        # Перевірка: має бути webp (або шлях містить webp — вже перевірено)
+        if 'webp' not in content_type and 'webp' not in path.lower():
+            log.error(f"❌ Content-Type не webp ({content_type}) — {image_url}")
+            return None
 
-        time.sleep(requests_delay)
+        content = r.content
+        if not content or len(content) < 200:
+            log.error(f"❌ Файл занадто малий ({len(content)} байт): {image_url}")
+            return None
 
-        for attempt in range(retries):
-            file_stream = BytesIO(content)
-            headers = {
-                'Content-Disposition': f'attachment; filename="{filename}"'
-            }
+        filename = f"{uuid4().hex}.webp"
+        file_stream = BytesIO(content)
+        file_stream.seek(0)
 
-            # Визначаємо тип файлу за розширенням
-            ext = filename.split('.')[-1].lower()
-            mime_types = {
-                'jpg': 'image/jpeg',
-                'jpeg': 'image/jpeg',
-                'png': 'image/png',
-                'webp': 'image/webp',
-            }
-            mime_type = mime_types.get(ext, 'application/octet-stream')
+        wp_headers = {
+            'Content-Disposition': f'attachment; filename="{filename}"'
+        }
 
-            res = requests.post(
+        for attempt in range(max_attempts):
+            res = sess.post(
                 f"{WC_URL}/wp-json/wp/v2/media",
                 auth=(WC_USERNAME, WC_PASSWORD),
-                headers=headers,
-                files={'file': (filename, file_stream, mime_type)}
+                headers=wp_headers,
+                files={'file': (filename, file_stream, 'image/webp')},
+                timeout=30
             )
 
-            if res and res.status_code in [200, 201]:
+            if res is not None and res.status_code in (200, 201):
                 try:
-                    return res.json()["id"]
-                except json.JSONDecodeError:
-                    log.error(f"❌ Не вдалося розпарсити JSON відповідь: {res.text}.\n🔁 Повторна спроба...")
+                    return res.json().get('id')
+                except Exception:
+                    log.error("❌ Не вдалося розпарсити JSON з WP: " + (res.text or ""))
+                    return None
             else:
-                log.error(f"❌ WC не прийняв картинку (спроба {attempt+1}): {res.status_code if res else '❌'} {res.text[:200] if res else ''}")
-                time.sleep(error_delay)
-
-        log.error(f"❌ Вичерпано спроб завантаження зображення для {image_url}")
+                log.error(f"❌ Завантаження не вдалося (attempt {attempt+1}): {getattr(res,'status_code',None)} {getattr(res,'text','')[:200]}")
+                # швидка спроба — не чекаємо
         return None
 
     except Exception as e:
-        log.error(f"❌ Виняток при завантаженні зображення: {e}")
+        log.error(f"❌ Виняток: {e}")
         return None
 
 # Функція для отримання або створення категорії з ланцюжком (breadcrumb)
@@ -437,3 +448,9 @@ def get_or_create_category_chain(breadcrumb_string):
             return None
 
     return final_id
+
+if __name__ == "__main__":
+    test_batch = [
+        {'title': 'Bottega 2 Slice Stainless Steel Toaster', 'url': 'https://www.towerhousewares.co.uk/toasters/rose-gold-2-slice-ss-toaster-2', 'regular_price': 44.99, 'sale_price': None, 'description': '<div class="squeeze-up tab-pane fade in active" id="description_0_1651566202983" role="tabpanel">\n<div class="row margin-0 push-down">\n<div class="col-xs-12">\n<div class="row"><div class="col-sm-12"><h2 style="text-align: center;">Bottega<span style="font-size: 2rem;">\xa0</span>2 Slice Stainless Steel Toaster</h2><h3 style="text-align: center;">From toast to bagels to crumpets, get toasting your favourite baked goods with ease\xa0</h3><p style="text-align: center;"><img src="https://images.shopcdn.co.uk/df/b8/dfb8505819643947b243cbe6f761fd0f/970x300/webp/resize"/></p><p style="text-align: center;"><strong>ADJUSTABLE BROWNING CONTROL</strong></p><p style="text-align: center;">Choose from a range of settings for bread, muffins, crumpets and bagels</p><p style="text-align: center;">\xa0</p><p style="text-align: center;"><strong>SELF-CENTRING FUNCTION</strong></p><p style="text-align: center;">Makes sure your food is toasted to a perfect consistency for delicious results</p><p style="text-align: center;">\xa0</p><p style="text-align: center;"><strong>DEFROST &amp; REHEAT</strong></p><p style="text-align: center;">Toast your food straight from frozen and ensure it is toasted to the perfect temperature</p><p style="text-align: center;">\xa0</p><p style="text-align: center;"><strong>EASY-TO-CLEAN</strong></p><p style="text-align: center;">Removable tray makes it easy to dispose of excess crumbs and keep your surfaces tidy</p><p style="text-align: center;">\xa0</p><p style="text-align: center;"><strong>CORD STORAGE</strong></p><p style="text-align: center;">Integrated cord storage keeps your kitchen free from messy, trailing wires</p><p style="text-align: center;">\xa0</p><p style="text-align: center;"><strong>ROSE GOLD COLLECTION</strong></p><p style="text-align: center;">For a contemporary designed kitchen, the look with the full Rose Gold range from Tower</p><p style="text-align: center;">\xa0</p><p style="text-align: center;"><strong>3 YEAR WARRANTY</strong></p><p style="text-align: center;">Comes with standard 1 year warranty and an additional 2 years when registering the product online within 28 days of purchase</p><p style="text-align: center;">\xa0</p><p style="text-align: center;">Be a toasting champion with the Tower Bottega rose gold 2 slice toaster. Featuring variable browning control that gives you precise toasting results that suits your taste. From loaves, bagels and crumpets, the self-centring function will consistently toast your items to perfection after every use. For more functionality, the toaster includes a defrost, reheat and cancel options for better control and convenience for toasting frozen snacks.</p><p style="text-align: center;">Including a removable tray for an easy clean and keeping your countertop crumb-free with a cord storage to keep surfaces wire-free. Finished with a black coating and rose gold accents, the Bottega toaster complements the look of your kitchen countertop.</p></div></div><div class="row"><div class="col-sm-4" style="text-align: center;"><img src="https://images.shopcdn.co.uk/74/04/74041b619022ce1782abcc5ff4bc038e/1350x1350/webp/resize"/></div><div class="col-sm-4" style="text-align: center;"><img src="https://images.shopcdn.co.uk/34/80/34800a52714daa461547e5b5e4f30cf3/1350x1350/webp/resize"/></div><div class="col-sm-4" style="text-align: center;"><img src="https://images.shopcdn.co.uk/6c/0f/6c0f5437b919e86442f09c82032cc9be/1350x1350/webp/resize"/></div></div> </div>\n</div>\n</div>', 'categories': 'Kitchen Appliances > Breakfast > Toasters', 'images': ['https://images.shopcdn.co.uk/d7/08/d70882899a8e5df964c048dcb93307f1/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/e5/97/e59735059b7e3a31707000fdd3c0de0b/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/44/33/443368dd1f5b66b722c9e35c5ba4464c/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/8c/ee/8cee066ed97da2b3de9e65109d0a18a3/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/41/3e/413ed613f5628e9733eddb843cbbe578/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/6f/aa/6faaabbb2416221789dfc25dd5173f5a/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/a7/f0/a7f04653881b7d41d9461f7739fb0929/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/e0/6e/e06e1d12c28568042115493f6def1241/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/82/32/82329b137abfbc8a3ee7ef366ef80cc8/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/62/fa/62fa8bcf335e52438deede91ff53452b/512x512/webp/fit?force=true'], 'brand': 'Tower', 'variations': [{'sku': 'T20016W', 'color': 'white', 'availability': False, 'images': ['https://images.shopcdn.co.uk/d7/08/d70882899a8e5df964c048dcb93307f1/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/e5/97/e59735059b7e3a31707000fdd3c0de0b/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/44/33/443368dd1f5b66b722c9e35c5ba4464c/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/8c/ee/8cee066ed97da2b3de9e65109d0a18a3/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/41/3e/413ed613f5628e9733eddb843cbbe578/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/6f/aa/6faaabbb2416221789dfc25dd5173f5a/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/a7/f0/a7f04653881b7d41d9461f7739fb0929/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/e0/6e/e06e1d12c28568042115493f6def1241/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/82/32/82329b137abfbc8a3ee7ef366ef80cc8/512x512/webp/fit?force=true', 'https://images.shopcdn.co.uk/62/fa/62fa8bcf335e52438deede91ff53452b/512x512/webp/fit?force=true']}]}
+    ]
+    import_batch(test_batch)
