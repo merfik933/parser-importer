@@ -1,7 +1,6 @@
 import os
 import json
 import time
-from tqdm import tqdm
 import threading
 from pathlib import Path
 from queue import Queue
@@ -11,6 +10,7 @@ import requests
 from urllib.parse import urlparse
 from io import BytesIO
 import configparser
+from tqdm import tqdm
 import webcolors
 from rapidfuzz import process
 
@@ -18,8 +18,11 @@ from rapidfuzz import process
 config = configparser.ConfigParser()
 config.read('config.ini')
 
+# Параметри з конфігурації
+max_retries = config.getint('IMPORTER', 'max_retries', fallback=3)
 download_images_before_import = config.getboolean('IMPORTER', 'download_images_before_import', fallback=True)
 requests_delay = config.getint('IMPORTER', 'requests_delay', fallback=1)
+error_delay = config.getint('IMPORTER', 'error_delay', fallback=5)
 default_swatches_size = config.getint('IMPORTER', 'default_swatches_size', fallback=32)
 
 # Завантажуємо .env
@@ -29,9 +32,6 @@ WC_KEY = os.getenv("WC_KEY")
 WC_SECRET = os.getenv("WC_SECRET")
 WC_USERNAME = os.getenv("WC_USERNAME")
 WC_PASSWORD = os.getenv("WC_PASSWORD")
-
-# Глобальна черга з шляхами до файлів-батчів
-batch_queue = Queue()
 
 # Флаг для контролю процесу обробки
 is_processing = False
@@ -46,10 +46,12 @@ HEADERS = {
 
 # Функція для виконання HTTP запитів з повторними спробами
 def make_request(method, url, **kwargs):
-    for attempt in range(3):
+    for attempt in range(max_retries):
         if attempt > 0:
-            print(f"🔁 Повторна спроба {attempt+1} для {method.upper()} {url}")
-        time.sleep(requests_delay)
+            print(f"🔁 Повторна спроба {attempt+1} для {method.upper()} {url} через {error_delay} секунд")
+            time.sleep(error_delay)
+        else:
+            time.sleep(requests_delay)
         try:
             response = requests.request(method, url, **kwargs)
 
@@ -86,37 +88,6 @@ def get_attribute_id_by_slug(slug):
 
 color_id = get_attribute_id_by_slug("pa_color")
 size_id = get_attribute_id_by_slug("pa_size")
-
-# Функція для додавання батчу в чергу
-def add_batch_to_queue(batch_path: str):
-    global is_processing
-    if Path(batch_path).is_file():
-        batch_queue.put(batch_path)
-        
-        with processing_lock:
-            if not is_processing:
-                is_processing = True
-                threading.Thread(target=process_batch, daemon=True).start()
-    else:
-        print(f"❌ Файл не знайдено: {batch_path}")
-
-# Обробка одного батчу
-def process_batch():
-    global is_processing
-    while not batch_queue.empty():
-        batch_path = batch_queue.get()
-        try:
-            with open(batch_path, 'r', encoding='utf-8') as file:
-                data = json.load(file)
-                try:
-                    import_batch(data)
-                except Exception as e:
-                    print(f"❌ Помилка при обробці {batch_path}: {e}")
-        except Exception as e:
-            print(f"❌ Помилка при обробці {batch_path}: {e}")
-        finally:
-            batch_queue.task_done()
-    is_processing = False
 
 # Функція для імпорту батчу
 def import_batch(products):
@@ -187,17 +158,17 @@ def import_batch(products):
 
             return terms_ids
 
-        # Обробка розмірів
-        sizes = list(dict.fromkeys(v["size"] for v in p["variations"] if v.get("size")))
-        if sizes:
-            sizes_ids = ensure_terms_exist(size_id, sizes)
-            attributes.append({
-                "id": size_id,
-                "name": "size",
-                "variation": True,
-                "visible": True,
-                "options": sizes
-            })
+        # Обробка розмірів ( в цьому донорі розміри не використовуються )
+        # sizes = list(dict.fromkeys(v["size"] for v in p["variations"] if v.get("size")))
+        # if sizes:
+        #     sizes_ids = ensure_terms_exist(size_id, sizes)
+        #     attributes.append({
+        #         "id": size_id,
+        #         "name": "size",
+        #         "variation": True,
+        #         "visible": True,
+        #         "options": sizes
+        #     })
 
         # Обробка кольорів
         colors = list(dict.fromkeys(v["color"] for v in p["variations"] if v.get("color")))
@@ -340,7 +311,7 @@ def import_batch(products):
             print(f"  ↳ ✅ Варіацій додано: {len(variations)} для продукту ID {product_id}")
 
 # Функція для завантаження зображення до WooCommerce
-def upload_image_to_wc(image_url, retries=3):
+def upload_image_to_wc(image_url, retries=max_retries):
     try:
         response = make_request("GET", image_url, headers=HEADERS)
         if not response or response.status_code != 200:
@@ -355,17 +326,29 @@ def upload_image_to_wc(image_url, retries=3):
 
         filename = Path(urlparse(image_url).path).name
 
+        time.sleep(requests_delay)
+
         for attempt in range(retries):
             file_stream = BytesIO(content)
             headers = {
                 'Content-Disposition': f'attachment; filename="{filename}"'
             }
 
+            # Визначаємо тип файлу за розширенням
+            ext = filename.split('.')[-1].lower()
+            mime_types = {
+                'jpg': 'image/jpeg',
+                'jpeg': 'image/jpeg',
+                'png': 'image/png',
+                'webp': 'image/webp',
+            }
+            mime_type = mime_types.get(ext, 'application/octet-stream')
+
             res = requests.post(
                 f"{WC_URL}/wp-json/wp/v2/media",
                 auth=(WC_USERNAME, WC_PASSWORD),
                 headers=headers,
-                files={'file': (filename, file_stream, 'image/jpeg')}
+                files={'file': (filename, file_stream, mime_type)}
             )
 
             if res and res.status_code in [200, 201]:
@@ -375,7 +358,7 @@ def upload_image_to_wc(image_url, retries=3):
                     print(f"❌ Не вдалося розпарсити JSON відповідь: {res.text}.\n🔁 Повторна спроба...")
             else:
                 print(f"❌ WC не прийняв картинку (спроба {attempt+1}): {res.status_code if res else '❌'} {res.text[:200] if res else ''}")
-                time.sleep(requests_delay)
+                time.sleep(error_delay)
 
         print(f"❌ Вичерпано спроб завантаження зображення для {image_url}")
         return None
@@ -439,27 +422,3 @@ def get_or_create_category_chain(breadcrumb_string):
             return None
 
     return final_id
-
-
-if __name__ == "__main__":
-    import time
-
-    add_batch_to_queue('data/batches/batch_0.json')
-    # time.sleep(1)  # Затримка для демонстрації асинхронності
-
-    # add_batch_to_queue('data/batches/batch_1.json')
-    # time.sleep(1)  # Затримка для демонстрації асинхронності
-
-    # add_batch_to_queue('data/batches/batch_2.json')
-    # time.sleep(1)  # Затримка для демонстрації асинхронності
-
-    # add_batch_to_queue('data/batches/batch_3.json')
-    # time.sleep(1)  # Затримка для демонстрації асинхронності
-
-    # add_batch_to_queue('data/batches/batch_4.json')
-    # time.sleep(1)  # Затримка для демонстрації асинхронності
-
-    # Очікуємо завершення обробки всіх батчів
-    batch_queue.join()
-
-    print("Всі батчі оброблено.")
