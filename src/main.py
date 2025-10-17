@@ -1,8 +1,8 @@
 import json
 import os
 
-# from parser import collect_products_from_categories
-# from importer import import_batch
+from parser import collect_products_from_categories
+from importer import import_batch
 
 # Ініціалізація логера
 from utils.log import init_logger
@@ -29,7 +29,7 @@ def main():
             return
 
     # Збір та імпорт даних
-    # collect_products_from_categories(categories, import_batch)
+    collect_products_from_categories(categories, import_batch)
 
     log.info("Процес збору та імпорту даних завершено.")
 

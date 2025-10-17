@@ -4,6 +4,7 @@ import configparser
 import requests
 from bs4 import BeautifulSoup
 import re
+import pandas as pd
 
 # Ініціалізація логера
 from utils.log import init_logger
@@ -51,6 +52,11 @@ HEADERS = {
 
 # Глобальна змінна для зберігання обробника продуктів
 product_handler = None
+
+try:
+    status_df = pd.read_csv('data/status.csv')
+except (FileNotFoundError, pd.errors.EmptyDataError):
+    status_df = None
 
 # Функція для збору даних про продукти з категорій
 def collect_products_from_categories(categories, handler):
@@ -119,6 +125,10 @@ def collect_category(category):
                         if product_handler:
                             product_handler(batch_data)
                         batch_data = []
+                        try:
+                            status_df = pd.read_csv('data/status.csv')
+                        except (FileNotFoundError, pd.errors.EmptyDataError):
+                            status_df = None
                 except Exception as e:
                     log.error(f"Помилка при зборі даних для продукту {full_url}: {e}")
                     time.sleep(error_delay)
@@ -155,6 +165,15 @@ def collect_product_page(url):
     else:
         print(f"Не вдалося знайти назву продукту на сторінці {url}")
         return None
+    
+    main_sku_element = soup.select_one(VARIATION_SKU_SELECTOR)
+    if main_sku_element:
+        main_sku = main_sku_element.get_text(strip=True).replace("SKU:", "").strip()
+
+    if status_df is not None:
+        if main_sku in status_df['SKU'].values:
+            log.info(f"Продукт з SKU {main_sku} вже оброблений. Пропускаємо.")
+            return None
 
     # Функція для очищення та перетворення тексту ціни у число
     def extract_price(text):

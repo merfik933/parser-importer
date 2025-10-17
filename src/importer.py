@@ -13,6 +13,7 @@ import configparser
 from tqdm import tqdm
 import webcolors
 from rapidfuzz import process
+import pandas as pd
 
 # Отримуємо налаштування з конфігурації
 config = configparser.ConfigParser()
@@ -36,8 +37,11 @@ WC_PASSWORD = os.getenv("WC_PASSWORD")
 # Флаг для контролю процесу обробки
 is_processing = False
 
-# Лок для синхронізації доступу до черги
-processing_lock = threading.Lock()
+# Зчитуємо статус файл, якщо він існує, якщо ні - створюємо порожній DataFrame
+try:
+    status_df = pd.read_csv('data/status.csv')
+except (FileNotFoundError, pd.errors.EmptyDataError):
+    status_df = pd.DataFrame(columns=["SKU", "Name"])
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
@@ -97,7 +101,7 @@ def import_batch(products):
 
     all_img_urls = {}
     last_categories = {}
-    
+
     # Формуємо дані для створення товарів
     for p in tqdm(products, desc="Імпорт батчу товарів", unit="т."):
         # Імпорт варіацій
@@ -309,6 +313,13 @@ def import_batch(products):
             print(f"❌ Варіації для продукту ID {product_obj.get('id', 'невідомо')} не додано: {var_res.status_code}")
         else:
             print(f"  ↳ ✅ Варіацій додано: {len(variations)} для продукту ID {product_id}")
+            # Оновлюємо статус продукту в статус файлі
+            global status_df
+            for v in p["variations"]:
+                status_df = status_df.append({
+                    "SKU": v["sku"],
+                    "Name": p["title"]
+                }, ignore_index=True)
 
 # Функція для завантаження зображення до WooCommerce
 def upload_image_to_wc(image_url, retries=max_retries):
