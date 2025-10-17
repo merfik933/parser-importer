@@ -321,6 +321,10 @@ def import_batch(products):
                     "Name": p["title"]
                 }, ignore_index=True)
 
+    # Зберігаємо оновлений статус файл
+    status_df.to_csv('data/status.csv', index=False)
+    
+
 # Функція для завантаження зображення до WooCommerce
 def upload_image_to_wc(image_url, retries=max_retries):
     try:
