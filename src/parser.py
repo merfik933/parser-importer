@@ -118,8 +118,9 @@ def collect_category(category):
 
                     if product_data:
                         batch_data.append(product_data)
-                        counter += 1
-                        log.info(f"Зібрано продуктів: {counter}/{product_count} з категорії {category}. \n Дані продукту: {product_data}")
+                        
+                    counter += 1
+                    log.info(f"Зібрано продуктів: {counter}/{product_count} з категорії {category}. \n Дані продукту: {product_data}")
                         
                     if len(batch_data) >= batch_size:
                         if product_handler:

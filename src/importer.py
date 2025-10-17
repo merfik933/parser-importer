@@ -1,19 +1,19 @@
 import os
 import json
 import time
-import threading
 from pathlib import Path
-from queue import Queue
 from dotenv import load_dotenv
-import threading
 import requests
 from urllib.parse import urlparse
 from io import BytesIO
 import configparser
 from tqdm import tqdm
 import webcolors
-from rapidfuzz import process
 import pandas as pd
+from utils.log import init_logger
+
+# Ініціалізуємо логер
+log = init_logger(__name__)
 
 # Отримуємо налаштування з конфігурації
 config = configparser.ConfigParser()
@@ -52,7 +52,7 @@ HEADERS = {
 def make_request(method, url, **kwargs):
     for attempt in range(max_retries):
         if attempt > 0:
-            print(f"🔁 Повторна спроба {attempt+1} для {method.upper()} {url} через {error_delay} секунд")
+            log.warning(f"🔁 Повторна спроба {attempt+1} для {method.upper()} {url} через {error_delay} секунд")
             time.sleep(error_delay)
         else:
             time.sleep(requests_delay)
@@ -60,18 +60,18 @@ def make_request(method, url, **kwargs):
             response = requests.request(method, url, **kwargs)
 
             if "Fatal error" in response.text:
-                print(f"❌ WC Fatal error: {response.text[:200]}...")
+                log.error(f"❌ WC Fatal error: {response.text[:200]}...")
                 continue
 
             if response.status_code in [200, 201]:
                 return response
 
-            print(f"❌ Спроба {attempt+1}: {response.status_code} {response.text[:200]}...")
+            log.error(f"❌ Спроба {attempt+1}: {response.status_code} {response.text[:200]}...")
 
         except Exception as e:
-            print(f"❌ Виняток при запиті (спроба {attempt+1}): {e}")
+            log.error(f"❌ Виняток при запиті (спроба {attempt+1}): {e}")
 
-    print(f"❌ Не вдалося виконати {method.upper()} {url} після 3 спроб")
+    log.error(f"❌ Не вдалося виконати {method.upper()} {url} після 3 спроб")
     return None
 
 # Отримання ID атрибуту за slug
@@ -146,7 +146,7 @@ def import_batch(products):
                         json={"name": term}
                     )
                     if r.status_code != 201:
-                        print(f"⚠️ Не вдалося створити термін '{term}': {r.status_code} - {r.text}")
+                        log.warning(f"⚠️ Не вдалося створити термін '{term}': {r.status_code} - {r.text}")
                         continue
                     term_id = r.json().get("id")
 
@@ -158,7 +158,7 @@ def import_batch(products):
                             json={"term_id": term_id, "hex": hex_code}
                         )
                     else:
-                        print(f"⚠️ Не вдалося визначити HEX для '{term}'")
+                        log.warning(f"⚠️ Не вдалося визначити HEX для '{term}'")
 
             return terms_ids
 
@@ -202,7 +202,7 @@ def import_batch(products):
         # Отримання категорії
         if p["categories"] in last_categories:
             category_id = last_categories[p["categories"]]
-            print(f"🔄 Використання останньої категорії: {p['categories']} (ID: {category_id})")
+            log.info(f"🔄 Використання останньої категорії: {p['categories']} (ID: {category_id})")
         else:
             category_id = get_or_create_category_chain(p["categories"])
 
@@ -270,12 +270,12 @@ def import_batch(products):
 
     # Перевірка статусу відповіді
     if product_res.status_code not in [200, 201]:
-        print(f"❌ Помилка при створенні товарів: {product_res.status_code} {product_res.text}")
+        log.error(f"❌ Помилка при створенні товарів: {product_res.status_code} {product_res.text}")
         return
 
     # Отримання створених товарів
     created = product_res.json().get("create", [])
-    print(f"✅ Створено товарів: {len(created)}")
+    log.info(f"✅ Створено товарів: {len(created)}")
 
     # Імпорт варіацій для кожного створеного товару
     for product_obj, p in tqdm(zip(created, products), total=len(created), desc="Імпорт варіацій батчу", unit="в."):
@@ -310,9 +310,9 @@ def import_batch(products):
         )
 
         if var_res.status_code not in [200, 201]:
-            print(f"❌ Варіації для продукту ID {product_obj.get('id', 'невідомо')} не додано: {var_res.status_code}")
+            log.error(f"❌ Варіації для продукту ID {product_obj.get('id', 'невідомо')} не додано: {var_res.status_code}")
         else:
-            print(f"  ↳ ✅ Варіацій додано: {len(variations)} для продукту ID {product_id}")
+            log.info(f"  ↳ ✅ Варіацій додано: {len(variations)} для продукту ID {product_id}")
             # Оновлюємо статус продукту в статус файлі
             global status_df
             for v in p["variations"]:
@@ -330,13 +330,13 @@ def upload_image_to_wc(image_url, retries=max_retries):
     try:
         response = make_request("GET", image_url, headers=HEADERS)
         if not response or response.status_code != 200:
-            print(f"❌ Помилка завантаження картинки: {image_url}")
+            log.error(f"❌ Помилка завантаження картинки: {image_url}")
             return None
 
         content = response.content
 
         if not content or len(content) < 100:
-            print(f"❌ Порожній або надто малий файл: {image_url}")
+            log.error(f"❌ Порожній або надто малий файл: {image_url}")
             return None
 
         filename = Path(urlparse(image_url).path).name
@@ -370,16 +370,16 @@ def upload_image_to_wc(image_url, retries=max_retries):
                 try:
                     return res.json()["id"]
                 except json.JSONDecodeError:
-                    print(f"❌ Не вдалося розпарсити JSON відповідь: {res.text}.\n🔁 Повторна спроба...")
+                    log.error(f"❌ Не вдалося розпарсити JSON відповідь: {res.text}.\n🔁 Повторна спроба...")
             else:
-                print(f"❌ WC не прийняв картинку (спроба {attempt+1}): {res.status_code if res else '❌'} {res.text[:200] if res else ''}")
+                log.error(f"❌ WC не прийняв картинку (спроба {attempt+1}): {res.status_code if res else '❌'} {res.text[:200] if res else ''}")
                 time.sleep(error_delay)
 
-        print(f"❌ Вичерпано спроб завантаження зображення для {image_url}")
+        log.error(f"❌ Вичерпано спроб завантаження зображення для {image_url}")
         return None
 
     except Exception as e:
-        print(f"❌ Виняток при завантаженні зображення: {e}")
+        log.error(f"❌ Виняток при завантаженні зображення: {e}")
         return None
 
 # Функція для отримання або створення категорії з ланцюжком (breadcrumb)
@@ -398,13 +398,13 @@ def get_or_create_category_chain(breadcrumb_string):
         )
 
         if not res:
-            print(f"❌ Не вдалося отримати категорії для '{cat}'")
+            log.error(f"❌ Не вдалося отримати категорії для '{cat}'")
             return None
 
         try:
             data = res.json()
         except Exception as e:
-            print(f"❌ Некоректний JSON у відповіді: {res.text}")
+            log.error(f"❌ Некоректний JSON у відповіді: {res.text}")
             raise e
         cat_obj = next((c for c in data if c["name"].lower() == cat.lower()), None)
 
@@ -421,7 +421,7 @@ def get_or_create_category_chain(breadcrumb_string):
         )
 
         if not new_res:
-            print(f"❌ Запит створення категорії '{cat}' не дав відповіді")
+            log.error(f"❌ Запит створення категорії '{cat}' не дав відповіді")
             return None
 
         new_cat = new_res.json()
@@ -433,7 +433,7 @@ def get_or_create_category_chain(breadcrumb_string):
             final_id = new_cat["data"]["resource_id"]
             parent_id = final_id
         else:
-            print(f"❌ Помилка створення категорії '{cat}': {new_cat}")
+            log.error(f"❌ Помилка створення категорії '{cat}': {new_cat}")
             return None
 
     return final_id

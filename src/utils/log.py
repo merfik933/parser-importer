@@ -10,24 +10,27 @@ def init_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     :return: Ініціалізований логер.
     """
 
-    logger = logging.getLogger("app_logger")
+    # Використовуємо передане ім'я як ім'я логера, щоб уникнути колізій
+    logger = logging.getLogger(name)
     logger.setLevel(level)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
-    # Створення директорії для логів, якщо її немає
-    logs_dir = './logs'
-    if not os.path.exists(logs_dir):
-        os.makedirs(logs_dir)
+    # Додаємо хендлери лише якщо їх ще немає (щоб уникнути дублювання повідомлень)
+    if not logger.handlers:
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
-    # Файловий хендлер
-    file_handler = logging.FileHandler(os.path.join(logs_dir, f'{name}.log'), mode='w', encoding='utf-8')
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+        # Створення директорії для логів, якщо її немає
+        logs_dir = './logs'
+        os.makedirs(logs_dir, exist_ok=True)
 
-    # Консольний хендлер
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+        # Файловий хендлер
+        file_handler = logging.FileHandler(os.path.join(logs_dir, f'{name}.log'), mode='w', encoding='utf-8')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+        # Консольний хендлер
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
     logger.propagate = False
     return logger
