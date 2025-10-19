@@ -321,16 +321,16 @@ def import_batch(products):
             # Оновлюємо статус продукту в статус файлі
             global status_df
             for v in p["variations"]:
-                status_df = status_df.append({
+                status_df.loc[len(status_df)] = {
                     "SKU": v["sku"],
                     "Name": p["title"]
-                }, ignore_index=True)
+                }
 
     # Зберігаємо оновлений статус файл
     status_df.to_csv('data/status.csv', index=False)
     
 # Функція для завантаження зображення до WooCommerce
-def upload_image_to_wc(image_url, session=None, max_attempts=1, timeout=10):
+def upload_image_to_wc(image_url, session=None, max_attempts=1):
     """
     Швидке завантаження тільки для webp-подібних URL (наприклад: .../webp/fit?...).
     Повертає ID медіа у WP або None.
@@ -339,21 +339,14 @@ def upload_image_to_wc(image_url, session=None, max_attempts=1, timeout=10):
         # Просте правило: якщо в шляху немає 'webp' — вихід
         path = urlparse(image_url).path or ""
         if 'webp' not in path.lower():
-            log.error("❌ URL не виглядає як webp — пропускаю: " + image_url)
             return None
 
         sess = session or requests.Session()
         get_headers = {'User-Agent': 'Mozilla/5.0 (ImageUploader/fast)'}
-        r = sess.get(image_url, headers=get_headers, timeout=timeout, allow_redirects=True)
+        r = sess.get(image_url, headers=get_headers, allow_redirects=True)
 
         if r.status_code != 200:
-            log.error(f"❌ GET failed {r.status_code} for {image_url}")
-            return None
-
-        content_type = (r.headers.get('Content-Type') or '').lower()
-        # Перевірка: має бути webp (або шлях містить webp — вже перевірено)
-        if 'webp' not in content_type and 'webp' not in path.lower():
-            log.error(f"❌ Content-Type не webp ({content_type}) — {image_url}")
+            log.error(f"❌ Не вдалося завантажити зображення ({r.status_code}): {image_url}")
             return None
 
         content = r.content
@@ -375,7 +368,6 @@ def upload_image_to_wc(image_url, session=None, max_attempts=1, timeout=10):
                 auth=(WC_USERNAME, WC_PASSWORD),
                 headers=wp_headers,
                 files={'file': (filename, file_stream, 'image/webp')},
-                timeout=30
             )
 
             if res is not None and res.status_code in (200, 201):
@@ -386,7 +378,9 @@ def upload_image_to_wc(image_url, session=None, max_attempts=1, timeout=10):
                     return None
             else:
                 log.error(f"❌ Завантаження не вдалося (attempt {attempt+1}): {getattr(res,'status_code',None)} {getattr(res,'text','')[:200]}")
-                # швидка спроба — не чекаємо
+                time.sleep(error_delay)
+
+        time.sleep(requests_delay)
         return None
 
     except Exception as e:
