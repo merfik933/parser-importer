@@ -127,6 +127,7 @@ def collect_category(category):
                             product_handler(batch_data)
                         batch_data = []
                         try:
+                            global status_df
                             status_df = pd.read_csv('data/status.csv')
                         except (FileNotFoundError, pd.errors.EmptyDataError):
                             status_df = None
