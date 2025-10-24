@@ -35,9 +35,6 @@ WC_SECRET = os.getenv("WC_SECRET")
 WC_USERNAME = os.getenv("WC_USERNAME")
 WC_PASSWORD = os.getenv("WC_PASSWORD")
 
-# Флаг для контролю процесу обробки
-is_processing = False
-
 # Зчитуємо статус файл, якщо він існує, якщо ні - створюємо порожній DataFrame
 try:
     status_df = pd.read_csv('data/status.csv')
