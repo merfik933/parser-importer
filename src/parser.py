@@ -46,9 +46,10 @@ CATEGORIES_SELECTOR = "li.crumb.header a"
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3',
     'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
+    "Accept-Encoding": "identity",
     'Connection': 'keep-alive'
 }
+
 
 # Глобальна змінна для зберігання обробника продуктів
 product_handler = None
@@ -226,6 +227,26 @@ def collect_product_page(url):
     # Задаємо бренд
     brand = "Tower"
 
+    # Отримання відгуків
+    reviews_url = f"https://api.reviews.io/timeline/data?type=product_review&store=tower&sort=date_desc&page=1&per_page=15&include_sentiment_analysis=true&widget=polaris&sku={main_sku}&lang=en&enable_avatars=true&include_subrating_breakdown=1"
+    reviews = []
+    try:
+        reviews_response = requests.get(reviews_url, headers=HEADERS)
+        reviews_response.raise_for_status()
+        reviews_data = reviews_response.json()
+        for review in reviews_data.get("timeline", []):
+            reviews.append({
+                "reviewer": review.get("_source", {}).get("author"),
+                "rating": review.get("_source", {}).get("rating"),
+                "review": review.get("_source", {}).get("comments"),
+                "reviewer_email": "anonymous@gmail.com",
+                "status": "approved"
+            })
+    except Exception as e:
+        log.error(f"Не вдалося отримати відгуки для продукту {url}: {e}")
+
+    print(f"Знайдено відгуків: {len(reviews)} для продукту {title}")
+
     # Функція для отримання варіації
     def get_variation(variation_url, color_name):
         try:
@@ -318,6 +339,7 @@ def collect_product_page(url):
         "images": images,
         "brand": brand,
         "variations": variations,
+        "reviews": reviews
     }
     return product_data
 

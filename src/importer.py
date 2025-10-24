@@ -279,6 +279,40 @@ def import_batch(products):
     created = product_res.json().get("create", [])
     log.info(f"✅ Створено товарів: {len(created)}")
 
+    reviews_payload = {
+        "create": []
+    }
+
+    # Додавання відгуків до вантажу
+    for product_obj, p in tqdm(zip(created, products), total=len(created), desc="Підготовка відгуків батчу", unit="в."):
+        product_id = product_obj["id"]
+        for review in p.get("reviews", []):
+            reviews_payload["create"].append({
+                "product_id": product_id,
+                "reviewer": review["reviewer"],
+                "reviewer_email": review["reviewer_email"],
+                "review": review["review"],
+                "rating": review["rating"],
+                "status": review["status"]
+            })
+
+    # Імпорт відгуків батчу
+    if reviews_payload["create"]:
+        reviews_res = make_request(
+            "POST",
+            f"{WC_URL}/wp-json/wc/v3/products/reviews/batch",
+            auth=(WC_KEY, WC_SECRET),
+            json=reviews_payload
+        )
+
+        if reviews_res.status_code not in [200, 201]:
+            log.error(f"❌ Відгуки не додано: {reviews_res.status_code} {reviews_res.text}")
+        else:
+            created_reviews = reviews_res.json().get("create", [])
+            print(reviews_res.json())
+            print(reviews_res.headers)
+            log.info(f"✅ Відгуків додано: {len(created_reviews)}")
+
     # Імпорт варіацій для кожного створеного товару
     for product_obj, p in tqdm(zip(created, products), total=len(created), desc="Імпорт варіацій батчу", unit="в."):
         product_id = product_obj["id"]
