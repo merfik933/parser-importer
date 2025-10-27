@@ -1,7 +1,5 @@
 import os
-import json
 import time
-from pathlib import Path
 from dotenv import load_dotenv
 import requests
 from urllib.parse import urlparse
@@ -12,6 +10,8 @@ import webcolors
 import pandas as pd
 from utils.log import init_logger
 from uuid import uuid4
+from bs4 import BeautifulSoup
+import cssutils
 
 # Ініціалізуємо логер
 log = init_logger(__name__)
@@ -26,6 +26,7 @@ download_images_before_import = config.getboolean('IMPORTER', 'download_images_b
 requests_delay = config.getint('IMPORTER', 'requests_delay', fallback=1)
 error_delay = config.getint('IMPORTER', 'error_delay', fallback=5)
 default_swatches_size = config.getint('IMPORTER', 'default_swatches_size', fallback=32)
+add_custom_description_style = config.getboolean('IMPORTER', 'add_custom_description_style', fallback=False)
 
 # Завантажуємо .env
 load_dotenv()
@@ -45,6 +46,13 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
     "Accept-Language": "en-US,en;q=0.5",
 }
+
+# CSS для стилізації опису
+if add_custom_description_style:
+    with open('custom_description_style.css', 'r', encoding='utf-8') as f:
+        custom_style = f.read()
+
+    style_sheet = cssutils.parseString(custom_style)
 
 # Функція для виконання HTTP запитів з повторними спробами
 def make_request(method, url, **kwargs):
@@ -222,6 +230,56 @@ def import_batch(products):
                 color_term_id = colors_term_ids.get(color_name)
                 if color_term_id:
                     swatches[str(color_term_id)] = {"image": str(img_urls.get(var["images"][0], ""))}
+
+        def inline_css(html: str) -> str:
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            for rule in style_sheet:
+                if rule.type != rule.STYLE_RULE:
+                    continue
+
+                selector = rule.selectorText
+
+                style_parts = []
+                for prop in rule.style:
+                    val = prop.value
+                    if prop.priority:
+                        val += f" !{prop.priority}"
+                    style_parts.append(f"{prop.name}: {val};")
+                style = " ".join(style_parts)
+
+                for element in soup.select(selector):
+                    existing_style = element.get("style", "")
+                    if existing_style and not existing_style.endswith(";"):
+                        existing_style += ";"
+                    element["style"] = existing_style + style
+
+            return str(soup)
+
+        # Функція для обробки опису
+        def process_description(description: str) -> str:
+            if not description:
+                return ""
+
+            soup = BeautifulSoup(description, "html.parser")
+            
+            for img in soup.find_all("img"):
+                src = img.get("src")
+                if src and not src.startswith("https://www.fruugo.co.uk"):
+                    img["src"] = "https://www.fruugo.co.uk" + src
+            return str(soup)
+
+        # Додаємо кастомні стилі до опису і обробляємо його
+        if add_custom_description_style:
+            try:
+                description = inline_css(p["description"])
+                description = process_description(description)
+            except Exception as e:
+                log.error(f"Не вдалося обробити опис для '{p['title']}': {e}")
+                description = p["description"]
+        else:
+            description = p["description"]
 
         if swatches:
             meta_data = [
